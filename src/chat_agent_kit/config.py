@@ -20,7 +20,7 @@ class Config:
 
     channel: str = "cli"                 # cli | imessage | whatsapp
     agent: str = "simple"                # simple | echo | command
-    provider: str = "openai"             # openai | anthropic | openrouter | gemini | github | ollama | lmstudio | custom
+    provider: str = "openai"             # API/local presets, or codex/cursor/grok-subscription
     base_url: str | None = None          # override the provider preset
     api_key: str | None = None
     model: str | None = None
