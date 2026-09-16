@@ -15,6 +15,7 @@ from .providers import (
     AnthropicProvider,
     EchoProvider,
     OpenAICompatibleProvider,
+    SubscriptionCliProvider,
 )
 from .runner import AgentRunner
 
@@ -30,7 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent", choices=["simple", "echo", "command"],
                    help="simple = the customizable LLM boilerplate (default)")
     p.add_argument("--provider",
-                   choices=list(PROVIDER_PRESETS) + ["anthropic"],
+                   choices=list(PROVIDER_PRESETS) + ["anthropic", "codex-subscription",
+                                                    "cursor-subscription", "grok-subscription"],
                    help="who answers (default: openai)")
     p.add_argument("--base-url", help="custom OpenAI-compatible endpoint")
     p.add_argument("--model", help="override the provider's default model")
@@ -50,6 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
 def build_provider(config: Config):
     if config.agent != "simple":
         return None
+    if config.provider in {"codex-subscription", "cursor-subscription", "grok-subscription"}:
+        return SubscriptionCliProvider(config.provider, model=config.model)
     if config.provider == "anthropic":
         return AnthropicProvider(api_key=config.api_key, model=config.model or DEFAULT_MODEL)
     if config.base_url:
