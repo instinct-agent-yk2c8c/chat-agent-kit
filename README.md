@@ -29,11 +29,11 @@ you <--reply-- [iMessage | WhatsApp] <---------- LLM reply
 This kit was built after researching what is actually possible
 (September 2026 - see [docs/research.md](docs/research.md)):
 
-- **ChatGPT Plus, Claude Pro/Max, and Cursor subscriptions cannot power
-  this.** They do not include API access. What works is an **API key**
-  (OpenAI, Anthropic, Gemini, GitHub Models, OpenRouter - several have free
-  tiers) or a **local model** (Ollama, LM Studio). Full matrix with sources:
-  [docs/providers.md](docs/providers.md)
+- **A subscription is not a general model API, but some now have a supported
+  local path.** ChatGPT/Codex, Cursor, and Grok subscription bridges are
+  available through their supported local CLIs. Claude subscription use is
+  not enabled because Anthropic restricts unapproved third-party products.
+  Full matrix and primary sources: [docs/subscriptions.md](docs/subscriptions.md)
 - **iMessage has no official API.** The channel reads your Mac's Messages
   database and replies through Messages.app. It needs a Mac signed in to
   iMessage, Full Disk Access, and Automation permission.
@@ -77,9 +77,16 @@ chat-agent --channel cli --provider github     # CHAT_AGENT_API_KEY=GitHub PAT (
 # Local and free: Ollama (ollama pull llama3.2 first)
 chat-agent --channel cli --provider ollama
 
+# Existing subscriptions through supported local CLIs
+chat-agent --channel cli --provider codex-subscription
+chat-agent --channel cli --provider cursor-subscription
+chat-agent --channel cli --provider grok-subscription --model xai/grok-build-0.1
+
 # Anything else OpenAI-compatible
 chat-agent --channel cli --base-url https://your-endpoint/v1 --model your-model
 ```
+
+Subscription setup and exact boundaries: [docs/subscriptions.md](docs/subscriptions.md).
 
 ## Go live on iMessage (macOS only)
 
@@ -130,7 +137,7 @@ agent. None of this is legal advice; the docs link the primary sources.
 src/chat_agent_kit/
   agents.py        # EchoAgent, CommandAgent, SimpleAgent (the boilerplate)
   runner.py        # allowlist / rate-limit / dry-run policy, channel glue
-  providers/       # openai_compatible (one client, many providers), anthropic, echo
+  providers/       # APIs/local models, plus supported local subscription CLIs
   channels/        # cli, imessage (chat.db + AppleScript), whatsapp_cloud (webhook)
 docs/              # providers.md, imessage.md, whatsapp.md, research.md
 examples/          # demo.py (no creds needed), custom_agent.py
