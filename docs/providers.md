@@ -5,9 +5,11 @@ linked official docs before you build on them.
 
 ## The short version
 
-Consumer AI **subscriptions** (ChatGPT Plus, Claude Pro/Max, Cursor) do not
-give you API access. What powers a self-hosted agent is an **API key** (or a
-local model). Some API keys are free.
+Consumer AI **subscriptions** do not give you a general model API. But some
+providers now expose a supported local coding CLI or a named third-party OAuth
+integration. This kit can use those narrow subscription paths without copying
+tokens. See [subscriptions.md](subscriptions.md). API keys and local models
+remain the best fit for a general or high-volume chat agent.
 
 | What you have | Does it work? | Why |
 |---|---|---|
@@ -18,9 +20,10 @@ local model). Some API keys are free.
 | **OpenRouter** API key | ✅ Yes, free models exist | One key, 500+ models. Set `CHAT_AGENT_PROVIDER=openrouter`. |
 | **Ollama** or **LM Studio** (local) | ✅ Yes, free & private | Runs on your machine, no key. `CHAT_AGENT_PROVIDER=ollama` / `lmstudio`. |
 | Any other **OpenAI-compatible endpoint** | ✅ Yes | `--base-url` + `CHAT_AGENT_API_KEY` + `--model`. |
-| ChatGPT **Plus/Pro subscription** | ❌ No | "API usage is separate and billed independently." |
-| Claude **Pro/Max subscription** | ❌ No | "A paid Claude subscription... doesn't include access to the Claude API or Console." |
-| Cursor **subscription** | ❌ No | Cursor's APIs run Cursor's own coding agents; "not a standalone model-inference or chat-completions API." |
+| ChatGPT plan with **Codex** | ✅ Narrow path | Supported local Codex CLI login + non-interactive execution; not a general API. |
+| Claude **Pro/Max** | ⚠️ Not enabled | Claude Code works, but Anthropic restricts unapproved third-party claude.ai login/rate-limit use. |
+| **Cursor** subscription | ✅ Narrow path | Supported local Cursor Agent CLI in non-interactive Ask mode; not a general API. |
+| **SuperGrok / eligible X Premium** | ✅ Narrow path | xAI-documented OAuth through OpenCode; not the xAI API. |
 | Session cookies / subscription tokens scraped from a browser | ❌ Never | Violates the provider's terms, breaks constantly, and this kit will not support it. |
 
 ## Details and sources
