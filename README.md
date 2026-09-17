@@ -52,7 +52,7 @@ cd chat-agent-kit
 pip install -e .
 
 python examples/demo.py    # simulated iMessage + WhatsApp end-to-end
-python -m unittest discover -s tests   # 38 tests
+python -m unittest discover -s tests   # 39 tests
 chat-agent --channel cli --agent command   # talk to it in your terminal
 ```
 
@@ -143,7 +143,7 @@ src/chat_agent_kit/
   channels/        # cli, imessage (chat.db + AppleScript), whatsapp_cloud (webhook)
 docs/              # providers.md, imessage.md, whatsapp.md, research.md
 examples/          # demo.py (no creds needed), custom_agent.py
-tests/             # 38 tests, stdlib unittest (pytest-compatible)
+tests/             # 39 tests, stdlib unittest (pytest-compatible)
 ```
 
 ## License
