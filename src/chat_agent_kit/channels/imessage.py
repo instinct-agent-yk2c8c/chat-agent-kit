@@ -93,9 +93,24 @@ class IMessageChannel(Channel):
             return int(row[0])
 
     def save_checkpoint(self, last_rowid: int) -> None:
-        os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
-        with open(self.state_path, "w") as f:
-            json.dump({"last_rowid": last_rowid}, f)
+        """Atomically persist progress without discarding other channel state."""
+        parent = os.path.dirname(self.state_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        state = {}
+        if os.path.exists(self.state_path):
+            try:
+                with open(self.state_path) as f:
+                    state = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                state = {}
+        state["last_rowid"] = last_rowid
+        temporary = f"{self.state_path}.tmp"
+        with open(temporary, "w") as f:
+            json.dump(state, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, self.state_path)
 
     def fetch_new(self, since_rowid: int) -> list[InboundMessage]:
         """Inbound direct iMessages with ROWID > since_rowid, oldest first."""
@@ -112,19 +127,25 @@ class IMessageChannel(Channel):
             for rowid, text, raw_date, handle, _service in rows
         ]
 
+    def process_once(self, runner, checkpoint: int | None = None) -> int:
+        """Handle one poll and commit each message only after handling succeeds."""
+        checkpoint = self.load_checkpoint() if checkpoint is None else checkpoint
+        for message in self.fetch_new(checkpoint):
+            log.info("inbound from %s: %r", message.sender, message.text)
+            # If model work or delivery raises, this message is not checkpointed.
+            runner.handle_message(message, self.send)
+            checkpoint = max(checkpoint, int(message.id))
+            self.save_checkpoint(checkpoint)
+        return checkpoint
+
     def run(self, runner) -> None:
         checkpoint = self.load_checkpoint()
         log.info("watching %s (checkpoint=%s)", self.db_path, checkpoint)
         try:
             while True:
-                for message in self.fetch_new(checkpoint):
-                    log.info("inbound from %s: %r", message.sender, message.text)
-                    runner.handle_message(message, self.send)
-                    checkpoint = max(checkpoint, int(message.id))
-                self.save_checkpoint(checkpoint)
+                checkpoint = self.process_once(runner, checkpoint)
                 time.sleep(self.poll_interval)
         except KeyboardInterrupt:
-            self.save_checkpoint(checkpoint)
             log.info("stopped; checkpoint saved at %s", checkpoint)
 
     def send(self, message: InboundMessage, text: str) -> None:

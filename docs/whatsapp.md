@@ -68,5 +68,13 @@ with country code, no `+`.
 - `WHATSAPP_APP_SECRET` enables HMAC signature verification on every
   webhook POST. Set it - without it, anyone who finds your URL can feed
   fake messages to your agent.
-- Duplicate deliveries are deduped by message id in the state file.
+- Incoming text events are committed to a SQLite inbox next to the state file
+  before the server returns HTTP 200. Model work and sending happen on a
+  background worker, so a slow provider never delays webhook acknowledgement.
+- Message ids are unique in that inbox. Meta retries are deduped, unfinished
+  work is recovered on restart, and failed model/send attempts remain pending
+  for retry. If the inbox cannot be committed, the webhook returns 503 so Meta
+  can deliver it again.
+- Existing `seen_whatsapp_ids` state is migrated as completed work on upgrade.
+  The existing `--state` path and environment setup remain valid.
 - Keep the access token in env vars or a secret manager, never in git.

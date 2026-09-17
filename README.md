@@ -52,7 +52,7 @@ cd chat-agent-kit
 pip install -e .
 
 python examples/demo.py    # simulated iMessage + WhatsApp end-to-end
-python -m unittest discover -s tests   # 29 tests
+python -m unittest discover -s tests   # 38 tests
 chat-agent --channel cli --agent command   # talk to it in your terminal
 ```
 
@@ -118,8 +118,10 @@ chat-agent --channel whatsapp --port 8080 --respond-to 15551234567 --send
 - **Allowlist required**: refuses to start on real channels without an
   explicit list of who may get replies
 - **Rate limiting** per sender and a **reply length cap**
-- **Read-only, immutable** chat.db access; checkpointing so it never
-  replays your texting history
+- **Read-only, immutable** chat.db access; checkpoints advance only after
+  successful handling, so a failed reply is retried instead of dropped
+- **Durable WhatsApp inbox**: commit and acknowledge the webhook before model
+  work; duplicate deliveries are ignored and unfinished work resumes on restart
 - **Webhook signature verification** on WhatsApp when you set the app secret
 - **Your keys stay yours**: env vars only, nothing phones home, no analytics
 
@@ -141,7 +143,7 @@ src/chat_agent_kit/
   channels/        # cli, imessage (chat.db + AppleScript), whatsapp_cloud (webhook)
 docs/              # providers.md, imessage.md, whatsapp.md, research.md
 examples/          # demo.py (no creds needed), custom_agent.py
-tests/             # 29 tests, stdlib unittest (pytest-compatible)
+tests/             # 38 tests, stdlib unittest (pytest-compatible)
 ```
 
 ## License

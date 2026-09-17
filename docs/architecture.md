@@ -124,7 +124,7 @@ OpenAI background mode can handle long model calls and webhooks can signal compl
 
 **Missing before “capable agent”:** persistent conversation/task schema; crash-safe queue/workflow engine; tool-call protocol; OAuth connectors; provenance-aware memory; search/vector retrieval; capability/approval engine; external-content trust labels; background subscriptions/timers; browser cell; vault/payment architecture; attachments/group/voice handling; multi-device ordering; per-user isolation; audit/export/deletion; tracing/evals; admin/incident controls; delivery readback; migrations/backups.
 
-Also fix two prototype hazards before relying on it: its WhatsApp handler does model work before returning 200, which increases webhook retry/duplicate risk; and the iMessage checkpoint advances even when handling/sending fails, which can silently drop work. Both need durable inbox/outbox processing.
+The two original reply-loop hazards are now fixed in the starter kit: WhatsApp commits inbound text events to a SQLite inbox before returning 200 and processes them on a background worker; iMessage checkpoints advance only after successful handling and send. Regression tests cover restart recovery, deduplication, failed-work retry, and checkpoint behavior. This is a safe baseline, not the full inbox/outbox design below: exactly-once outbound delivery still needs idempotency keys or delivery reconciliation because a process can die after an external send succeeds but before local completion is recorded.
 
 ## Milestones
 

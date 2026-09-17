@@ -32,8 +32,11 @@ chat-agent --channel imessage --respond-to +15551234567 --send
   your own outbound messages.
 - **Sends** by asking Messages.app to send, via AppleScript - the message
   goes out as you, from your Apple ID.
-- **Checkpoints** the highest seen message id so the agent never replays
-  your texting history on first run or restart.
+- **Checkpoints** the highest successfully handled message id so the agent
+  never replays your texting history on first run. Each checkpoint is written
+  atomically only after model work and any real send return successfully. If
+  either fails, the checkpoint stays behind that message and it is retried on
+  restart instead of silently dropped.
 
 ## Platform caveats
 

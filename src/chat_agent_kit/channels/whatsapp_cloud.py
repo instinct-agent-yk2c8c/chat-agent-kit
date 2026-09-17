@@ -1,21 +1,8 @@
 """WhatsApp channel: Meta's official WhatsApp Business Cloud API.
 
-This is the only WhatsApp path that does not risk your account. Personal
-WhatsApp has no API, and unofficial bridges (Baileys, whatsmeow,
-whatsapp-web.js) violate WhatsApp's terms and get numbers banned. The Cloud
-API is Meta's official, supported interface. See docs/whatsapp.md for the
-full setup guide and the trade-offs.
-
-What you need (all from https://developers.facebook.com):
-- a Meta developer app with the WhatsApp use case
-- a WhatsApp Business account and phone number (the free test number works
-  for development; your personal WhatsApp number cannot be used)
-- a permanent access token (system user token)
-- a public HTTPS URL for the webhook (e.g. via a tunnel in dev)
-
-You can only send free-form replies inside the 24-hour customer service
-window that opens when a user messages you - which fits this agent's
-reply-only design. Proactive outreach requires paid template messages.
+Inbound text events are committed to a local SQLite inbox before the webhook
+returns 200. A background worker performs model work after acknowledgement and
+retries unfinished rows after failures or restarts.
 """
 from __future__ import annotations
 
@@ -24,6 +11,9 @@ import hmac
 import json
 import logging
 import os
+import sqlite3
+import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -34,7 +24,7 @@ from .base import Channel
 
 log = logging.getLogger("chat_agent_kit")
 
-GRAPH_API_VERSION = "v26.0"  # released 2026-07-29; override with --graph-version
+GRAPH_API_VERSION = "v26.0"
 
 
 def verify_signature(app_secret: str, body: bytes, header: str | None) -> bool:
@@ -53,11 +43,7 @@ def check_webhook_verification(params: dict, verify_token: str) -> str | None:
 
 
 def parse_webhook_payload(payload: dict) -> list[InboundMessage]:
-    """Pull inbound text messages out of a Cloud API webhook body.
-
-    Ignores status receipts, non-text messages, and anything that is not a
-    user message - those are delivery bookkeeping, not something to answer.
-    """
+    """Pull inbound text messages out of a Cloud API webhook body."""
     out = []
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
@@ -72,9 +58,7 @@ def parse_webhook_payload(payload: dict) -> list[InboundMessage]:
                         id=msg.get("id", ""),
                         sender=msg.get("from", "unknown"),
                         text=msg.get("text", {}).get("body", ""),
-                        sent_at=(
-                            datetime.fromtimestamp(int(ts), tz=timezone.utc) if ts else None
-                        ),
+                        sent_at=datetime.fromtimestamp(int(ts), tz=timezone.utc) if ts else None,
                     )
                 )
     return out
@@ -103,51 +87,175 @@ class WhatsAppCloudChannel(Channel):
         self.port = port
         self.graph_base = f"https://graph.facebook.com/{graph_version}"
         self.state_path = state_path
-        self.max_seen_ids = max_seen_ids
-        self._seen_ids: list[str] = self._load_seen()
+        self.max_seen_ids = max_seen_ids  # retained for constructor compatibility
+        self.inbox_path = f"{state_path}.whatsapp-inbox.sqlite3" if state_path else ":memory:"
+        self._inbox_lock = threading.Lock()
+        self._memory_db = None
+        self._init_inbox()
 
-    # -- deduping: Meta retries webhook deliveries, so remember message ids --
-    def _load_seen(self) -> list[str]:
-        if self.state_path and os.path.exists(self.state_path):
+    def _connect_inbox(self) -> sqlite3.Connection:
+        if self.inbox_path == ":memory:":
+            if self._memory_db is None:
+                self._memory_db = sqlite3.connect(":memory:", check_same_thread=False)
+                self._memory_db.row_factory = sqlite3.Row
+            return self._memory_db
+        conn = sqlite3.connect(self.inbox_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_inbox(self) -> None:
+        if self.inbox_path != ":memory:":
+            parent = os.path.dirname(self.inbox_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+        with self._inbox_lock:
+            conn = self._connect_inbox()
             try:
-                with open(self.state_path) as f:
-                    return json.load(f).get("seen_whatsapp_ids", [])[-self.max_seen_ids:]
-            except (json.JSONDecodeError, OSError):
-                return []
-        return []
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS inbox (
+                        message_id TEXT PRIMARY KEY,
+                        sender TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        sent_at TEXT,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT,
+                        received_at TEXT NOT NULL
+                    )"""
+                )
+                # Preserve the old JSON dedupe list during an in-place upgrade.
+                if self.state_path and os.path.exists(self.state_path):
+                    try:
+                        with open(self.state_path) as state_file:
+                            old_ids = json.load(state_file).get("seen_whatsapp_ids", [])
+                    except (json.JSONDecodeError, OSError):
+                        old_ids = []
+                    now = datetime.now(timezone.utc).isoformat()
+                    for message_id in old_ids[-self.max_seen_ids:]:
+                        conn.execute(
+                            """INSERT OR IGNORE INTO inbox
+                               (message_id, sender, text, status, received_at)
+                               VALUES (?, 'unknown', '', 'done', ?)""",
+                            (message_id, now),
+                        )
+                # Work interrupted by process death is safe to retry on startup.
+                conn.execute("UPDATE inbox SET status='pending' WHERE status='processing'")
+                conn.commit()
+            finally:
+                if self.inbox_path != ":memory:":
+                    conn.close()
 
-    def _save_seen(self) -> None:
-        if not self.state_path:
-            return
-        os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
-        with open(self.state_path, "w") as f:
-            json.dump({"seen_whatsapp_ids": self._seen_ids[-self.max_seen_ids:]}, f)
+    def persist_messages(self, messages: list[InboundMessage]) -> int:
+        """Durably enqueue messages. Duplicate Meta message ids are ignored."""
+        inserted = 0
+        with self._inbox_lock:
+            conn = self._connect_inbox()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                for message in messages:
+                    if not message.id:
+                        log.warning("ignoring WhatsApp message without an id")
+                        continue
+                    cur = conn.execute(
+                        """INSERT OR IGNORE INTO inbox
+                           (message_id, sender, text, sent_at, received_at)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (
+                            message.id,
+                            message.sender,
+                            message.text,
+                            message.sent_at.isoformat() if message.sent_at else None,
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
+                    inserted += cur.rowcount
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                if self.inbox_path != ":memory:":
+                    conn.close()
+        return inserted
 
     def _is_duplicate(self, message_id: str) -> bool:
-        if not message_id:
-            return False
-        if message_id in self._seen_ids:
-            return True
-        self._seen_ids.append(message_id)
-        self._save_seen()
-        return False
+        """Compatibility helper: reserve an id in the durable inbox."""
+        message = InboundMessage(channel=self.name, id=message_id, sender="unknown", text="")
+        return self.persist_messages([message]) == 0
 
-    # -- outbound --
+    def _claim_next(self) -> InboundMessage | None:
+        with self._inbox_lock:
+            conn = self._connect_inbox()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT * FROM inbox WHERE status='pending' ORDER BY received_at LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    conn.commit()
+                    return None
+                conn.execute(
+                    "UPDATE inbox SET status='processing', attempts=attempts+1 WHERE message_id=?",
+                    (row["message_id"],),
+                )
+                conn.commit()
+            finally:
+                if self.inbox_path != ":memory:":
+                    conn.close()
+        sent_at = datetime.fromisoformat(row["sent_at"]) if row["sent_at"] else None
+        return InboundMessage(
+            channel=self.name, id=row["message_id"], sender=row["sender"],
+            text=row["text"], sent_at=sent_at,
+        )
+
+    def _finish(self, message_id: str, error: Exception | None = None) -> None:
+        with self._inbox_lock:
+            conn = self._connect_inbox()
+            try:
+                if error is None:
+                    conn.execute(
+                        "UPDATE inbox SET status='done', last_error=NULL WHERE message_id=?",
+                        (message_id,),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE inbox SET status='pending', last_error=? WHERE message_id=?",
+                        (str(error)[:1000], message_id),
+                    )
+                conn.commit()
+            finally:
+                if self.inbox_path != ":memory:":
+                    conn.close()
+
+    def process_pending(self, runner, limit: int | None = None) -> int:
+        """Process queued messages; leave a failed row pending for a later retry."""
+        processed = 0
+        while limit is None or processed < limit:
+            message = self._claim_next()
+            if message is None:
+                break
+            try:
+                log.info("inbound from %s: %r", message.sender, message.text)
+                runner.handle_message(message, self.send)
+            except Exception as exc:
+                self._finish(message.id, exc)
+                log.exception("WhatsApp message %s failed; retained for retry", message.id)
+                break
+            else:
+                self._finish(message.id)
+                processed += 1
+        return processed
+
     def send(self, message: InboundMessage, text: str) -> None:
         payload = {
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": message.sender,
-            "type": "text",
-            "text": {"body": text},
+            "messaging_product": "whatsapp", "recipient_type": "individual",
+            "to": message.sender, "type": "text", "text": {"body": text},
         }
         req = urllib.request.Request(
             f"{self.graph_base}/{self.phone_number_id}/messages",
             data=json.dumps(payload).encode(),
-            headers={
-                "Authorization": f"Bearer {self.access_token}",
-                "Content-Type": "application/json",
-            },
+            headers={"Authorization": f"Bearer {self.access_token}", "Content-Type": "application/json"},
             method="POST",
         )
         try:
@@ -157,12 +265,19 @@ class WhatsAppCloudChannel(Channel):
             body = e.read().decode()[:500]
             raise RuntimeError(f"WhatsApp send failed, HTTP {e.code}: {body}") from e
 
-    # -- inbound --
     def run(self, runner) -> None:
         channel = self
+        wake_worker = threading.Event()
+        stopping = threading.Event()
+
+        def worker():
+            while not stopping.is_set():
+                channel.process_pending(runner)
+                wake_worker.wait(1.0)
+                wake_worker.clear()
 
         class Handler(BaseHTTPRequestHandler):
-            def log_message(self, fmt, *args):  # quiet the default stderr log
+            def log_message(self, fmt, *args):
                 log.debug("webhook: " + fmt, *args)
 
             def _reply(self, code: int, body: str):
@@ -173,7 +288,6 @@ class WhatsAppCloudChannel(Channel):
 
             def do_GET(self):
                 from urllib.parse import parse_qsl, urlparse
-
                 params = dict(parse_qsl(urlparse(self.path).query))
                 challenge = check_webhook_verification(params, channel.verify_token)
                 if challenge is not None:
@@ -196,23 +310,28 @@ class WhatsAppCloudChannel(Channel):
                 except json.JSONDecodeError:
                     self._reply(400, "invalid json")
                     return
-                for message in parse_webhook_payload(payload):
-                    if channel._is_duplicate(message.id):
-                        continue
-                    log.info("inbound from %s: %r", message.sender, message.text)
-                    runner.handle_message(message, channel.send)
-                # Always 200 quickly; Meta retries on non-200s.
+                try:
+                    inserted = channel.persist_messages(parse_webhook_payload(payload))
+                except (OSError, sqlite3.Error):
+                    log.exception("could not persist WhatsApp webhook")
+                    self._reply(503, "storage unavailable")
+                    return
+                # The durable commit and HTTP acknowledgement both happen before
+                # the worker is signalled, so model latency never delays Meta's 200.
                 self._reply(200, "ok")
+                if inserted:
+                    wake_worker.set()
 
+        worker_thread = threading.Thread(target=worker, name="whatsapp-worker", daemon=True)
+        worker_thread.start()
         server = ThreadingHTTPServer((self.host, self.port), Handler)
-        log.info(
-            "WhatsApp webhook listening on http://%s:%s - expose it publicly "
-            "and set that URL in your Meta app's webhook settings",
-            self.host, self.port,
-        )
+        log.info("WhatsApp webhook listening on http://%s:%s", self.host, self.port)
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             log.info("stopped")
         finally:
+            stopping.set()
+            wake_worker.set()
             server.server_close()
+            worker_thread.join(timeout=2)

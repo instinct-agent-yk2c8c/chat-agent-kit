@@ -110,6 +110,57 @@ class TestChannel(unittest.TestCase):
                                    verify_token="v", state_path=ch.state_path)
         self.assertTrue(ch3._is_duplicate("wamid.1"))
 
+    def test_old_seen_id_state_migrates_without_reprocessing(self):
+        ch = self.make()
+        Path(ch.state_path).write_text(json.dumps({"seen_whatsapp_ids": ["wamid.old"]}))
+        migrated = WhatsAppCloudChannel(
+            access_token="t", phone_number_id="9", verify_token="v",
+            state_path=ch.state_path,
+        )
+        self.assertTrue(migrated._is_duplicate("wamid.old"))
+
+    def test_persist_then_process_survives_restart(self):
+        ch = self.make()
+        msg = parse_webhook_payload(PAYLOAD)[0]
+        self.assertEqual(ch.persist_messages([msg]), 1)
+        restarted = WhatsAppCloudChannel(
+            access_token="t", phone_number_id="9", verify_token="v",
+            state_path=ch.state_path,
+        )
+        handled = []
+
+        class Runner:
+            def handle_message(_, message, send):
+                handled.append(message.id)
+
+        self.assertEqual(restarted.process_pending(Runner()), 1)
+        self.assertEqual(handled, ["wamid.1"])
+        self.assertEqual(restarted.process_pending(Runner()), 0)
+
+    def test_failed_work_remains_pending_for_retry(self):
+        ch = self.make()
+        ch.persist_messages([parse_webhook_payload(PAYLOAD)[0]])
+
+        class FailingRunner:
+            def handle_message(_, message, send):
+                raise RuntimeError("model unavailable")
+
+        self.assertEqual(ch.process_pending(FailingRunner()), 0)
+        handled = []
+
+        class GoodRunner:
+            def handle_message(_, message, send):
+                handled.append(message.id)
+
+        self.assertEqual(ch.process_pending(GoodRunner()), 1)
+        self.assertEqual(handled, ["wamid.1"])
+
+    def test_duplicate_delivery_does_not_enqueue_twice(self):
+        ch = self.make()
+        msg = parse_webhook_payload(PAYLOAD)[0]
+        self.assertEqual(ch.persist_messages([msg]), 1)
+        self.assertEqual(ch.persist_messages([msg]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

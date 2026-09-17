@@ -69,6 +69,33 @@ class TestIMessageChannel(unittest.TestCase):
         insert(self.conn, "+15551111111", "old")
         self.assertGreater(self.channel.load_checkpoint(), 0)
 
+    def test_checkpoint_only_advances_after_successful_handling(self):
+        first = insert(self.conn, "+15551111111", "one")
+        second = insert(self.conn, "+15551111111", "two")
+        self.channel.save_checkpoint(0)
+
+        class Runner:
+            def handle_message(_, message, send):
+                if message.id == str(second):
+                    raise RuntimeError("send failed")
+
+        with self.assertRaisesRegex(RuntimeError, "send failed"):
+            self.channel.process_once(Runner(), 0)
+        self.assertEqual(self.channel.load_checkpoint(), first)
+        self.assertEqual([m.id for m in self.channel.fetch_new(first)], [str(second)])
+
+    def test_first_failed_message_leaves_checkpoint_unchanged(self):
+        insert(self.conn, "+15551111111", "one")
+        self.channel.save_checkpoint(0)
+
+        class Runner:
+            def handle_message(_, message, send):
+                raise RuntimeError("model failed")
+
+        with self.assertRaises(RuntimeError):
+            self.channel.process_once(Runner(), 0)
+        self.assertEqual(self.channel.load_checkpoint(), 0)
+
     def test_missing_db_raises_helpful_error(self):
         ch = IMessageChannel(str(Path(self.tmp) / "nope.db"), self.state)
         with self.assertRaisesRegex(FileNotFoundError, "Full Disk Access"):
